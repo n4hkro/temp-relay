@@ -1,13 +1,1 @@
-{
-  "name": "temp-relay",
-  "version": "1.29.1",
-  "private": true,
-  "type": "module",
-  "description": "Chrome MV3 extension: temp mail ünvanı yaradır, relay tabı bağlananda saytın məlumatını silib sessiyanı təzələyir.",
-  "scripts": {
-    "check": "node tools/check.mjs",
-    "test": "node --test",
-    "verify": "node tools/check.mjs && node --test",
-    "update:psl": "node tools/update-psl.mjs"
-  }
-}
+{"description":"Chrome MV3 extension: temp mail ünvanı yaradır, relay tabı bağlananda saytın məlumatını silib sessiyanı təzələyir.","name":"temp-relay","private":true,"scripts":{"build":"vite build","check":"tsx tools/check.ts","dev":"vite build --watch","test":"vitest run","test:e2e":"playwright test","test:watch":"vitest","typecheck":"tsc --noEmit","update:psl":"tsx tools/update-psl.ts","verify":"npm run typecheck && npm run check && npm run test && npm run build"},"type":"module","version":"1.30.0","devDependencies":{"@playwright/test":"^1.63.0","@types/chrome":"^0.3.0","@types/node":"^26.6.1","tsx":"^4.23.13","typescript":"^7.0.2","vite":"^8.3.0","vitest":"^5.0.1"}}

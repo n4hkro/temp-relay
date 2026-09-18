@@ -1,0 +1,1 @@
+{"compilerOptions":{"forceConsistentCasingInFileNames":true,"module":"esnext","moduleResolution":"bundler","noEmit":true,"resolveJsonModule":true,"skipLibCheck":true,"strict":true,"target":"es2022","types":["chrome","node"]},"include":["src","tests","tools","vite.config.ts","vitest.config.ts","playwright.config.ts"]}

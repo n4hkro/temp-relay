@@ -121,10 +121,10 @@ src/
     options-ui.js          sxemdən forma qurur (sayt dəyişəndə yenilənir)
     format.js              status → mətn/rəng/ömür çevirməsi (chrome-sız, testlənir)
   offscreen/               clipboard.html / clipboard.js
-tests/                     node:test — contract, options, extract, inbox, temp-tf, emailnator,
+tests/                     Vitest — contract, options, extract, inbox, temp-tf, emailnator,
                            signup, forms, identity, username, proxy, tools, net,
                            session, permissions, module-graph, format, errors
-tools/check.mjs            statik yoxlama: provider ↔ manifest uyğunluğu, rejimlər,
+tools/check.ts             statik yoxlama: provider ↔ manifest uyğunluğu, rejimlər,
                            poçt qutusu imkanı, DNR qayda faylı
 ```
 
@@ -136,7 +136,7 @@ Oxlar "idxal edir" mənasındadır. Yuxarıdan aşağıya doğru gedir, əksinə
 popup ─┐
        ├─▶ providers ─▶ contract ─▶ shared/options
 worker ┘        │
-   │            └─▶ shared ◀── popup, offscreen, tools/check.mjs
+   │            └─▶ shared ◀── popup, offscreen, tools/check.ts
    └─▶ shared
 ```
 
@@ -376,7 +376,7 @@ saytın xətası ora yazılmır: əsl qüsurlar 429 sətirlərinin altında gizl
    isə əksinə: `fetchAddress` uğursuzluqda **throw edir** və mesajı istifadəçiyə göstəriləcək
    dildə olmalıdır. Xətanın statusa çevrilməsi hər iki halda worker-in işidir.
 6. **`shared/` və `providers/` import anında `chrome`-a toxunmur.** Buna görə eyni modullar
-   node-da (`tests/`, `tools/check.mjs`) import oluna bilir — sayt protokolu brauzersiz test olunur.
+   node-da (`tests/`, `tools/check.ts`) import oluna bilir — sayt protokolu brauzersiz test olunur.
 7. **Xəta udulmur, səviyyəsi isə növündən gəlir.** Tutulan hər xəta `reportFailure` ilə
    status + bildiriş + console-a çevrilir; console səviyyəsini `shared/errors.js`-dəki bölgü
    seçir (`ExpectedError` → warn, proqram qüsuru → error). Qayda YALNIZ `notify.js`-də yazılıb:
@@ -385,7 +385,7 @@ saytın xətası ora yazılmır: əsl qüsurlar 429 sətirlərinin altında gizl
    (onlar həmişə extension-ın öz qüsuru sayılır → `console.error`).
 8. **Provider məlumatı yalnız deskriptordadır.** Host icazə şablonları `hosts`-dan törədilir,
    DNR qaydaları `requestOrigin`-dən (`shared/net.js`), əl ilə ikinci dəfə uyğunlaşdırılmır;
-   popup formaları `options.schema`-dan qurulur; uyğunluğu `tools/check.mjs` yoxlayır.
+   popup formaları `options.schema`-dan qurulur; uyğunluğu `tools/check.ts` yoxlayır.
 9. **"Dayandır" həmişə qalib gəlir.** Dayandır növbəyə qoyulmur, dərhal sessiyanı silir.
    Növbədəki uzun axın hər uzun addımdan sonra `isLiveSession`/`updateSession` ilə yoxlayır:
    sessiya yoxdursa və ya `started` fərqlidirsə (bu arada yeni Başlat olubsa), axın sakitcə
@@ -409,9 +409,16 @@ saytın xətası ora yazılmır: əsl qüsurlar 429 sətirlərinin altında gizl
 
 ## Qəbul edilmiş qərarlar
 
-**Niyə build addımı yoxdur?** Chrome MV3 modul service worker-ı (`"type": "module"`)
-və extension səhifələrində ESM import-u yerində dəstəkləyir. Bundler olmadan da qovluq
-birbaşa `Load unpacked` ilə yüklənir — quraşdırma addımı yoxdur, yoxlama isə node ilə aparılır.
+**Niyə TypeScript + Vite? (1.30.0-dan)** Əvvəl build addımı yox idi: Chrome MV3 modul
+service worker-ı və ESM import-u yerində dəstəkləyir, qovluq birbaşa `Load unpacked` ilə
+yüklənirdi. 6k+ sətirdə bu qərarın qiyməti artdı: mesaj kontraktları, storage state forması,
+options sxemləri kimi sərhədlərdəki səhvləri ancaq test tuturdu. TypeScript (`strict`, `any`
+yoxdur) bu sinfi kompilyatora keçirir; Vite isə üç giriş nöqtəsini (background, popup,
+offscreen) `dist/`-ə yığır — manifest-in göstərdiyi yollar dist daxilində eyni qalır, ona görə
+memarlıq dəyişmədi. `minify: false` — extension kodu debug olunur. WXT/Plasmo kimi
+framework-lər qəsdən seçilmədi: onlar öz qovluq konvensiyasını tələb edir, bu layihənin
+`src/shared` / `src/providers` / `src/background` sərhədləri isə sənədləşdirilmiş qərardır.
+Ətraflı: `docs/BUILD.md`.
 
 **Niyə provider-lər qovluq şəklindədir?** Hər saytın iki fərqli mühitdə işləyən kodu var
 (worker-də deskriptor və protokol, səhifədə skript). Qovluq bu sərhədi fayl səviyyəsində
@@ -707,7 +714,7 @@ və `color-scheme` native elementləri (select, scrollbar) də uyğunlaşdırır
 **Niyə host icazələri `optional_host_permissions`-da deyil?** İstənilən halda yeni sayt
 üçün `manifest.json`-a sətir əlavə edib extension-ı yeniləmək lazımdır — yəni optional
 variant əlavə yük azaltmır, yalnız hər istifadədə icazə pəncərəsi açır. Ona görə
-`host_permissions` saxlanılır, unudulma riski isə `tools/check.mjs` və popup-dakı
+`host_permissions` saxlanılır, unudulma riski isə `tools/check.ts` və popup-dakı
 Başlat yoxlaması ilə örtülür. API rejimində bu icazə həm də `fetch`-in CORS-u keçməsi üçün
 lazımdır — worker saytın domeninə icazəsiz sorğu göndərə bilməz.
 
@@ -759,7 +766,7 @@ Qaydaların iki qəsdən məhdudiyyəti var: yalnız `domainType: "thirdParty"` 
 toxunulmur) və CAPTCHA/fingerprint kitabxanaları siyahıya SALINMIR — onlar çox vaxt saytın giriş
 müdafiəsidir, bloklamaq səhifəni sındırır. Qalxanın işi izlənməni azaltmaqdır, müdafiəni aşmaq
 deyil. Qaydalar `requestDomains` ilə yazılır (domen + alt-domenlər); yol daşıyan yazı
-("bing.com/bat.js") Chrome tərəfindən ləğv olunur — `npm run check` və `tests/tools.test.mjs`
+("bing.com/bat.js") Chrome tərəfindən ləğv olunur — `npm run check` və `tests/tools.test.ts`
 formatı yoxlayır.
 
 **Niyə proxy Chrome-un `proxy` API-si ilədir?** Alternativ yoxdur: extension sorğuları tək-tək

@@ -226,7 +226,7 @@ Qaydalar:
   bu, doğru davranışdır — yenidən qalxanda qutu olduğu kimi oxunur.
 - **`signal`-ı `fetch`-ə ötür** — "Dayandır" və yeni ünvan gözləyən sorğunu dərhal kəsməlidir.
 - **`chrome.*` işlətmə** — `contract.js` rədd edir; modul `fetchImpl` ilə node-da test olunur
-  (nümunə: `tests/temp-tf.test.mjs`).
+  (nümunə: `tests/temp-tf.test.ts`).
 - Cookie və ya açar tələb olunursa `credentials: "include"` əlavə et: host icazəsi olduğu üçün
   brauzer cookie-ləri göndərir. Alınmırsa sayt poçtu API ilə oxunmur deməkdir — `fetchMessages`
   yazma, extension onsuz da işləyir.
@@ -367,7 +367,7 @@ Mexanika `src/background/signup.js`-dədir və bütün saytlar üçün eynidir. 
   (`class="border-input …"`) build-dən build-ə dəyişir.
 - **React/Vue idarə edən xana da işləyir**: dəyər prototipdəki native setter ilə yazılır.
   `el.value = kod` yolu DOM-u dəyişir, framework state-i isə boş qalır və forma boş dəyər
-  göndərir — bu, real saytlarda belədir (bax: `tests/signup.test.mjs`).
+  göndərir — bu, real saytlarda belədir (bax: `tests/signup.test.ts`).
 - **Extension serverin cavabını yoxlamır**: "forma dolduruldu" o deməkdir ki, addımlar icra
   olundu. Sayt sorğunu rədd etsə (limit, köhnə kod) səbəb saytın öz bildirişində görünür.
 - Selektorları saytda tap: DevTools → xanaya sağ klik → **Inspect**.
@@ -445,7 +445,7 @@ node -e "const p=await import('./src/providers/temp-mail/index.js');const r=awai
 }
 ```
 
-Uyğunsuzluq `npm run check` (bölmə 3b) və `tests/net.test.mjs` tərəfindən tutulur: fayl
+Uyğunsuzluq `npm run check` (bölmə 3b) və `tests/net.test.ts` tərəfindən tutulur: fayl
 deskriptorlardan törədilən qayda ilə birebir üst-üstə düşməlidir. Əksər saytlarda bu addım
 LAZIM DEYİL — `requestOrigin` yazılmasa nə qayda, nə icazə tələb olunur.
 

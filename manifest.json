@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Temp mail + relay",
-  "version": "1.29.1",
+  "version": "1.30.0",
   "description": "Seçilmiş temp mail saytında yeni ünvan yaradıb clipboard-a kopyalayır; relay tabı bağlananda saytın bütün məlumatını silib tabı yenidən açır.",
   "icons": { "128": "assets/icon.png" },
   "action": { "default_popup": "src/popup/popup.html", "default_title": "Temp mail + relay" },
