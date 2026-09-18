@@ -1,0 +1,447 @@
+// Orkestr: bütün iş axınları buradadır — Başlat, Dayandır, Yeni ünvan və relay tabının
+// bağlanmasına cavab. Qonşu modullar yalnız mexanikadır (tab, clipboard, təmizləmə,
+// bildiriş); provider-lər isə yalnız sayt məlumatı verir.
+//
+// İş növbəsi: eyni anda yalnız bir axın işləyir. "Yeni ünvan" ilə tabın bağlanması
+// hadisəsinin üst-üstə düşməsi vəziyyəti korlayardı (iki tab, iki clipboard yazısı),
+// ona görə əmrlər ardıcıl icra olunur.
+//
+// Növbə "dayandır"ı gözləmir: Dayandır dərhal icra olunur, növbədəki axın isə sessiyanın
+// silindiyini görüb öz-özünə dayanır (bax: updateSession / acquireAddress). Əks halda
+// istifadəçi "dayandır" basanda cavab saniyələrlə gecikər və axın sonra tabları yenə açardı.
+
+import { AcquireMode, acquireMode, adoptsActiveTab } from "../providers/contract.js";
+import { RELAY } from "../providers/relay/index.js";
+import { TEMP_MAIL } from "../providers/temp-mail/index.js";
+import { tabCleanupPlan } from "../shared/cleanup.js";
+import { ExpectedError, logFailure } from "../shared/errors.js";
+import { MessageType } from "../shared/messages.js";
+import { resolveValues, validateValues } from "../shared/options.js";
+import { buildIdentity } from "../shared/identity.js";
+import { generatePassword, PASSWORD_LENGTH } from "../shared/password.js";
+import { hasOriginAccess, originPattern } from "../shared/permissions.js";
+import { usernameFromAddress } from "../shared/username.js";
+import {
+  clearPendingWipe, clearSession, isLiveSession, readPendingWipe, readSession,
+  StatusLevel, updateSession, writePendingWipe, writeSession, writeStatus,
+} from "../shared/state.js";
+import { acquireAddress } from "./address.js";
+import { copyText } from "./clipboard.js";
+import { stopWatching, watchInbox } from "./inbox.js";
+import { clearData, clearPageStorage, clearRelayData } from "./cleanup.js";
+import { fillForm, fillNote, openSignup, signupValues } from "./forms.js";
+import { notify, reportFailure } from "./notify.js";
+import { resolveRelay } from "./relay.js";
+import { runSignup, SignupPhase, supportsSignup, usesPassword, usesSlot } from "./signup.js";
+import { openTab, settleTab, waitForLoad } from "./tabs.js";
+
+let queue = Promise.resolve();
+let commandGeneration = 0;
+let addressRequest = null;
+
+// Axını növbənin sonuna qoyur. Xəta həmişə tutulub istifadəçiyə çatdırılır (status +
+// bildiriş) və növünə görə console-a yazılır: saytın xətası warn, extension-ın öz qüsuru
+// error (bax: shared/errors.js, notify.js → reportFailure). Növbə qırılmır, sonrakı əmr
+// öz işini görə bilir.
+function enqueue(job, generation = commandGeneration) {
+  queue = queue.then(async () => {
+    if (generation !== commandGeneration) return;
+    try {
+      await job();
+    } catch (e) {
+      if (generation === commandGeneration) await reportFailure(e);
+    }
+  }).catch((e) => logFailure("əmr nəticəsi göstərilmədi:", e));
+  return queue;
+}
+
+// Popup-dan gələn xam seçimləri sxemə görə normallaşdırır və saytın öz qaydaları ilə yoxlayır.
+// Worker mesaja kor-koranə etibar etmir: popup köhnəlmiş və ya əl ilə pozulmuş ola bilər,
+// səhv kombinasiya isə tab açılmadan ƏVVƏL bilinməlidir.
+function resolveOptions(provider, raw) {
+  const values = resolveValues(provider, raw);
+  const error = validateValues(provider, values);
+  if (error) throw new ExpectedError(`${provider.name}: ${error}`);
+  return values;
+}
+
+// Popup-dan gələn əmr.
+// Uzun axınlar növbəyə qoyulur və DƏRHAL cavab qaytarılır — nəticə status və bildiriş ilə
+// görünür, çünki popup bu müddətdə bağlana bilər. Seçimə aid yoxlamalar (naməlum sayt,
+// aktiv sessiyanın olmaması, yanlış parametrlər) isə növbəyə qoymadan əvvəl edilir ki,
+// popup dərhal { ok: false, error } cavabı alsın.
+export async function handleCommand(message) {
+  switch (message?.type) {
+    case MessageType.START: {
+      const temp = TEMP_MAIL.get(message.tempId);
+      const relay = RELAY.get(message.relayId);
+      const values = resolveOptions(temp, message.options);
+      const generation = ++commandGeneration;
+      addressRequest?.abort();
+      await clearSession();
+      await stopWatching();
+      enqueue(() => start(temp, relay, values, message.tabId, generation), generation);
+      return;
+    }
+    case MessageType.STOP:
+      await stop();
+      return;
+    // Sessiyadan ASILI DEYİL: istənilən tabın saytına aid hər şeyi silir. Növbəyə
+    // qoyulmur — istifadəçi düyməyə basıb cavab gözləyir, uzun axın onu saxlamamalıdır.
+    case MessageType.CLEAR_TAB:
+      await clearTab(message.tabId);
+      return;
+    case MessageType.RETRY_INBOX: {
+      const session = await readSession();
+      if (!session?.address) throw new ExpectedError("aktiv poçt ünvanı yoxdur, əvvəlcə Başlat");
+      await stopWatching();
+      enqueue(async () => {
+        if (!await isLiveSession(session)) return;
+        watchInbox(session, session.address).catch((e) => logFailure("poçt yenidən yoxlanmadı:", e));
+      });
+      return;
+    }
+    case MessageType.NEW_ADDRESS: {
+      const session = await readSession();
+      // Popup köhnəlmiş ola bilər (sessiya bu arada bitib) — proqram qüsuru deyil, istifadəçiyə
+      // aydın mətn çatır: ExpectedError.
+      if (!session) throw new ExpectedError("aktiv sessiya yoxdur, əvvəlcə Başlat");
+      // Popup formdakı CARI dəyərləri göndərir: Gmail-dən Outlook-a keçib "Yeni ünvan"
+      // basanda seçim dərhal tətbiq olunur. Dəyər göndərilməyibsə sessiyadakı saxlanılır.
+      const temp = TEMP_MAIL.get(session.tempId);
+      const values = message.options === undefined ? session.options : resolveOptions(temp, message.options);
+      await stopWatching();
+      enqueue(() => renewWith(session, values));
+      return;
+    }
+    default:
+      throw new Error("naməlum əmr: " + JSON.stringify(message?.type ?? null));
+  }
+}
+
+// Relay tabı bağlananda çağrılır. Bütün pəncərə bağlanırsa sessiya bitir və heç nə
+// yenidən açılmır (istifadəçi işi qəsdən dayandırıb). "Bu sayt" relay-ində də sessiya bitir:
+// tab istifadəçinin özünündür, onu silib yenidən açmaq gözlənilməz olardı.
+export async function onTabClosed(tabId, { isWindowClosing } = {}) {
+  const session = await readSession();
+  if (!session || tabId !== session.relayTabId) return;
+  // Relay reyestrdən silinibsə (köhnə sessiya) tabı yenidən açmağın mənası yoxdur
+  const known = RELAY.has(session.relayId);
+  if (isWindowClosing || !known || adoptsActiveTab(RELAY.get(session.relayId))) {
+    ++commandGeneration;
+    addressRequest?.abort();
+    await clearSession();
+    await stopWatching();
+    await writeStatus(StatusLevel.info, isWindowClosing
+      ? "Pəncərə bağlandı, sessiya bitdi"
+      : known ? "Tab bağlandı, sessiya bitdi" : "Tab bağlandı — relay saytı artıq mövcud deyil, sessiya bitdi");
+    return;
+  }
+  enqueue(() => reopenRelay(session));
+}
+
+// Relay tabı: adi relay üçün yeni tab öndə açılır; "bu sayt" relay-ində isə istifadəçinin
+// AKTİV TABI mənimsənilir (heç nə açılmır). Temp mail tabı YALNIZ səhifə rejimində lazımdır —
+// API ilə işləyən sayt üçün tab açılmır (brauzerdə iz qalmır, iş saniyənin onda birində bitir).
+async function start(temp, relay, values, tabId, generation) {
+  let relayTab = null;
+  let relaySite = null;
+  if (adoptsActiveTab(relay)) {
+    // URL-i worker özü oxuyur: mənimsənilən sayt popup-dan gələn sətirə görə seçilməməlidir
+    if (!Number.isInteger(tabId)) throw new ExpectedError(`${relay.name}: aktiv tab tapılmadı`);
+    let tab = null;
+    try { tab = await chrome.tabs.get(tabId); } catch { throw new ExpectedError("aktiv tab tapılmadı (bağlanmış ola bilər)"); }
+    if (generation !== commandGeneration) return;
+    const plan = tabCleanupPlan(tab?.url);
+    if (!plan) throw new ExpectedError("aktiv tab adi sayt deyil — yalnız http/https saytlarında işləyir");
+    relayTab = tab;
+    relaySite = new URL(tab.url).origin;
+  } else {
+    relayTab = await openTab({ url: relay.url, active: true });
+  }
+  if (generation !== commandGeneration) return;
+
+  const needsTab = acquireMode(temp) === AcquireMode.page;
+  const tempTab = needsTab ? await openTab({ url: temp.url, active: false, windowId: relayTab.windowId }) : null;
+  if (generation !== commandGeneration) return;
+  const session = {
+    id: crypto.randomUUID(),
+    tempId: temp.id,
+    relayId: relay.id,
+    relaySite,
+    tempTabId: tempTab?.id ?? null,
+    relayTabId: relayTab.id,
+    windowId: relayTab.windowId,
+    options: values,
+    address: null,
+    username: null,
+    password: null,
+    identity: null,
+    started: Date.now(),
+  };
+  await writeSession(session);
+  if (generation !== commandGeneration || !await isLiveSession(session)) return;
+  const target = relaySite ? new URL(relaySite).host : relay.name;
+  await writeStatus(StatusLevel.info, `Başladı: ${temp.name} + ${target}, ünvan yaradılır…`);
+  if (tempTab) await waitForLoad(tempTab.id, temp.url);
+  await renew(session);
+}
+
+// Relay tabı bağlanıb: saytın bütün məlumatı silinir, tab yenidən açılır, yeni ünvan alınır.
+// Hər uzun addımdan sonra sessiyanın hələ aktiv və EYNİ sessiya olduğu yoxlanılır — bu arada
+// Dayandır basılıbsa və ya yeni Başlat olubsa, köhnə axın tab açmağı dayandırır.
+async function reopenRelay(session) {
+  const relay = resolveRelay(session);
+  await stopWatching();
+  if (!await isLiveSession(session)) return;
+  await writeStatus(StatusLevel.info, `${relay.name} tabı bağlandı, məlumat silinir…`);
+  const { cookies } = await clearRelayData(relay);
+  if (!await isLiveSession(session)) return;
+  const tab = await openTab({ url: relay.url, active: true, windowId: session.windowId });
+  if (!await updateSession(session, { relayTabId: tab.id, windowId: tab.windowId })) return;
+  await writeStatus(StatusLevel.info, `${relay.name}: ${cookies} cookie silindi, tab yenidən açıldı; yeni ünvan yaradılır…`);
+  await renew(session);
+}
+
+// Seçimi sessiyaya yazıb yeni ünvanı alır. Sessiya bu arada silinibsə və ya yenilənibsə
+// heç nə yazılmır (köhnə axın yeni sessiyanın parametrlərini pozmur).
+async function renewWith(session, values) {
+  if (!(await updateSession(session, { options: values }))) return;
+  await renew(session);
+}
+
+// Ünvanı alır, qeydiyyat formasını doldurur və poçt izləməsini işə salır.
+// null — sessiya bu arada dayandırılıb; xəta deyil, sadəcə axın sakitcə bitir.
+async function renew(session) {
+  if (!await isLiveSession(session)) return;
+  await stopWatching();
+  if (!await isLiveSession(session)) return;
+  const relay = resolveRelay(session);
+  const generic = !supportsSignup(relay, SignupPhase.afterAddress);
+  // Formanı açmaq üçün ünvan lazım deyil. Provayderin şəbəkə cavabı və
+  // clipboard davam edərkən səhifə/modal hazırlaşır; dəyərlər yalnız sonra yazılır.
+  const opening = generic ? openSignup(session).catch((e) => ({ error: e?.message ?? String(e) })) : null;
+  const controller = new AbortController();
+  const addressSince = Date.now();
+  addressRequest = controller;
+  let address;
+  try {
+    address = await acquireAddress(session, { signal: controller.signal });
+  } finally {
+    if (addressRequest === controller) addressRequest = null;
+  }
+  if (address === null) return;
+  // Ünvan sessiyaya yazılır: popup onu göstərir (yanındakı ⟳ düyməsi yenisini gətirir)
+  if (!await updateSession(session, { address, addressSince })) return;
+  await writeStatus(StatusLevel.info, `Ünvan hazırdır: ${address} — forma hazırlanır…`);
+  // Clipboard və sistem bildirişi forma üçün ilkin şərt deyil. Bəzi sistemlərdə
+  // onların cavabı gecikir; dəyərlər hazır olduğu halda doldurmanı saxlamamalıdır.
+  // Task aşağıda inbox-dan ƏVVƏL tamamlanır ki, ünvan sonradan OTP-ni əvəz etməsin.
+  const copying = (async () => {
+    if (!await isLiveSession(session)) return;
+    try {
+      await copyText(address, { windowId: session.windowId });
+      if (await isLiveSession(session)) await notify("Ünvan kopyalandı", address);
+    } catch (e) {
+      console.warn("ünvan kopyalanmadı:", e?.message ?? e);
+      if (await isLiveSession(session)) await notify("Ünvan kopyalanmadı", "Ünvan hazırdır; paneldən kopyalaya bilərsiniz.");
+    }
+  })().catch((e) => logFailure("clipboard nəticəsi göstərilmədi:", e));
+
+  // Parol, istifadəçi adı və bütöv şəxs profili hər qeydiyyat üçün yenidən yaradılır: eyni
+  // dəyər bütün hesablarda təkrarlanmasın. Profil ünvandan DETERMİNİST törədilir, ona görə
+  // kod fazasında (worker sönsə də) eyni şəxs alınır. Sessiyaya yazılır ki, popup göstərsin.
+  const patch = {};
+  if (usesPassword(relay) || generic) patch.password = generatePassword(relay.signup?.password?.length ?? PASSWORD_LENGTH);
+  if (usesSlot(relay, "username") || generic) patch.username = usernameFromAddress(address);
+  if (generic) {
+    const identity = buildIdentity(address);
+    patch.identity = identity;
+    patch.username = identity.username;
+  }
+  if (Object.keys(patch).length && !await updateSession(session, patch)) return;
+
+  // Faza 1: addımlar varsa dəqiq ardıcıllıq (metodu seç, ünvanı yaz, "Send code" bas),
+  // yoxsa naməlum saytda tam qeydiyyat: forma açılır → bütün xanalar doldurulur →
+  // razılıq xanaları işarələnir → qeydiyyat düyməsi basılır. Uğursuzluq axını qırmır:
+  // istifadəçi formanı əl ilə tamamlaya bilər, izləmə isə onsuz da işə düşür.
+  if (generic) {
+    await signupOnUnknownSite(session, relay, address, opening);
+  } else {
+    const result = await runSignup(session, relay, SignupPhase.afterAddress, {
+      address,
+      username: session.username,
+      password: session.password,
+    });
+    if (!await isLiveSession(session)) return;
+    if (result.done) await writeStatus(StatusLevel.info, `${relay.name}: forma doldurulub, kod istənildi — məktub gözlənilir…`);
+    else await reportFailure(new ExpectedError(`${relay.name}: qeydiyyat addımı alınmadı — ${result.reason}`));
+  }
+
+  // İzləmə növbəyə QOYULMUR və gözlənilmir: dəqiqələrlə davam edən döngü növbəni tutardı və
+  // "Yeni ünvan" əmri onun bitməsini gözləyərdi. Nəticə status, bildiriş və popup panelindədir.
+  // Sayt poçtu oxumağa imkan vermirsə watchInbox özü sakitcə çıxır.
+  await copying;
+  if (await isLiveSession(session)) {
+    watchInbox(session, address).catch((e) => logFailure("poçt izləməsi işə düşmədi:", e));
+  }
+}
+
+// NAMƏLUM saytda qeydiyyat — dörd addım. Heç biri məcburi deyil: biri alınmasa qalanı işləyir və
+// istifadəçi formanı əl ilə tamamlaya bilər (ünvan, ad, parol onsuz da popup-da və clipboard-da).
+//
+//   1) qeydiyyat forması AÇILIR — səhifədə parol xanası yoxdursa "Sign up / Register / Qeydiyyat"
+//      linki, düyməsi, tabı və ya metod seçimindəki "Continue with email" basılır; heç nə
+//      tapılmasa saytın öz qeydiyyat ÜNVANINA keçilir (/signup, /register…);
+//   2) forma DOLDURULUR və göndərilir — bütün tanınan xanalar + razılıq xanaları;
+//   3) forma TAPILMASA bir dəfə TƏKRAR axtarılır: səhifədə qeydiyyat qutusu olmaya bilər
+//      (məs. yalnız bülletenə abunə qutusu var — o, qəsdən bloklanır), belə halda qeydiyyat
+//      səhifəsi tapılıb doldurma yenidən sınanır;
+//   4) ÇOXMƏRHƏLƏLİ forma üçün ikinci keçid: göndərdikdən sonra yeni xanalar çıxa bilər
+//      (profil addımı). O keçid YALNIZ doldurur — nə olduğu bilinmədiyi üçün göndərmir.
+async function signupOnUnknownSite(session, relay, address, opening = null) {
+  const open = await (opening ?? openSignup(session));
+  if (!await isLiveSession(session)) return;
+  await reportOpen(relay, open);
+  if (!await isLiveSession(session)) return;
+
+  const values = signupValues(session, { email: address });
+  let result = await fillForm(session, values);
+  if (!await isLiveSession(session)) return;
+
+  // Forma tapılmadı və hələ keçid etməmişik → qeydiyyat səhifəsi axtarılır və BİR DƏFƏ
+  // təkrar cəhd edilir. Bu, "ana səhifədə Başlat basıldı" halının düzgün cavabıdır.
+  if (!result.done && !result.blocked && !open.navigatedTo) {
+    const again = await openSignup(session);
+    if (!await isLiveSession(session)) return;
+    if (again.navigatedTo || again.opened) {
+      await reportOpen(relay, again);
+      if (!await isLiveSession(session)) return;
+      result = await fillForm(session, values);
+      if (!await isLiveSession(session)) return;
+    }
+  }
+
+  if (!result.done) {
+    // İcazə problemi istifadəçidən asılıdır → görünən xəbərdarlıq. Sahə tapılmaması isə adi
+    // haldır (səhifədə forma yoxdur, kod başqa hesab üçündür) → yalnız console.
+    if (result.blocked) await writeStatus(StatusLevel.warn, `${relay.name}: forma doldurulmadı — ${result.reason}`);
+    else console.warn("forma doldurulmadı:", result.reason);
+    return;
+  }
+  await writeStatus(StatusLevel.info, `${relay.name}: ${fillNote(result)} — məktub gözlənilir…`);
+  if (!result.submitted) return;
+
+  // Göndərmədən sonra səhifə dəyişir: ya növbəti mərhələ, ya təsdiq ekranı, ya da başqa sayt.
+  // Naviqasiya olarsa tabın yüklənməsi gözlənilir — yoxsa skript ölməkdə olan sənədə düşür.
+  await new Promise((resolve) => setTimeout(resolve, NEXT_STEP_DELAY_MS));
+  await settleTab(session.relayTabId);
+  if (!await isLiveSession(session)) return;
+  const second = await fillForm(session, values, { submit: false, timeoutMs: NEXT_STEP_FIND_MS, onlyEmpty: true });
+  if (second.done && await isLiveSession(session)) {
+    await writeStatus(StatusLevel.info, `${relay.name}: növbəti mərhələ də dolduruldu (${fillNote(second)})`);
+  }
+}
+
+// Formanın açılması/keçidin nəticəsi istifadəçiyə çatdırılır: hansı düymə basıldı, hansı
+// ünvana keçildi (təxmin idisə bu da deyilir — sayt 404 verə bilər).
+async function reportOpen(relay, open) {
+  if (open.error) {
+    // Forma səhifədə onsuz da ola bilər — axını dayandırmırıq, sadəcə səbəbi yazırıq
+    if (open.blocked) await writeStatus(StatusLevel.warn, `${relay.name}: ${open.error}`);
+    else console.warn("qeydiyyat forması açılmadı:", open.error);
+    return;
+  }
+  if (open.navigatedTo) {
+    await writeStatus(StatusLevel.info,
+      `${relay.name}: qeydiyyat səhifəsinə keçildi — ${open.navigatedTo}`);
+    return;
+  }
+  if (open.opened) await writeStatus(StatusLevel.info, `${relay.name}: "${open.opened}" açıldı, forma doldurulur…`);
+}
+// Göndərmədən sonra səhifənin dəyişməsinə verilən vaxt və ikinci keçidin qısa axtarış limiti
+const NEXT_STEP_DELAY_MS = 2500;
+const NEXT_STEP_FIND_MS = 3000;
+
+async function stop() {
+  ++commandGeneration;
+  addressRequest?.abort();
+  await clearSession();
+  await stopWatching();
+  await writeStatus(StatusLevel.info, "Dayandırıldı (tablar açıq qalır)");
+}
+
+// "Bu saytın məlumatını sil" — relay axınından tam müstəqildir: plan tabın URL-indən
+// törədilir, ona görə istənilən sayt üçün işləyir. Ardıcıllıq vacibdir:
+//   1) səhifə saxlancı (sessionStorage tab yenilənəndə də qalır, ona görə ƏVVƏL);
+//   2) cookie + browsingData;
+//   3) tab yenilənir — səhifənin yaddaşındaki vəziyyət də getsin.
+//
+// Silmənin dərinliyi host icazəsindən asılıdır (bax: shared/permissions.js): icazə yoxsa
+// browsingData yenə işləyir, amma partitioned cookie-lər və sessionStorage kənarda qalır.
+// Belə halda sayt "gözləyən" kimi yazılır: istifadəçi icazə verən kimi (popup icazəni eyni
+// klikdə istəyir) silmə TAM şəkildə təkrarlanır — bax: onPermissionsGranted.
+async function wipe(plan, tabId) {
+  const full = await hasOriginAccess(plan.domain);
+  const entries = full && tabId ? await clearPageStorage(tabId, plan.storageOrigins) : 0;
+  // İcazə yoxsa cookie-ləri sadalamaq mümkün deyil; browsingData onları origin üzrə onsuz da
+  // silir, ona görə yalnız sayğac və partitioned cookie-lər itir.
+  const { cookies } = await clearData(full ? plan : { storageOrigins: plan.storageOrigins });
+  let reloaded = false;
+  if (tabId) {
+    try {
+      const current = await chrome.tabs.get(tabId);
+      if (new URL(current.url).hostname === plan.host) {
+        await chrome.tabs.reload(tabId, { bypassCache: true });
+        reloaded = true;
+      }
+    } catch (e) {
+      console.warn("tab yenilənmədi:", e?.message ?? e);
+    }
+  }
+
+  if (full) await clearPendingWipe();
+  else await writePendingWipe({ tabId: tabId ?? null, domain: plan.domain, at: Date.now() });
+
+  const done = full
+    ? `${cookies} əlçatan cookie (partitioned daxil), ${entries} saxlanc açarı və keş silindi`
+    : "cookie, saxlanc və keş silindi (icazədən sonra partitioned cookie və sessionStorage də silinir)";
+  // Ailə genişlənməsi istifadəçiyə DEYİLİR: "niyə Microsoft-un başqa domenləri də silindi"
+  // sualı yaranmasın və silmənin həqiqətən hesabı unutdurduğu görünsün.
+  const family = plan.familyName ? ` · ${plan.familyName}: ${plan.cookieDomains.length} əlaqəli domen` : "";
+  await writeStatus(StatusLevel.info, `${plan.domain}: ${done}${family}${reloaded ? ", tab yeniləndi" : ""}`);
+}
+
+async function clearTab(tabId) {
+  if (!Number.isInteger(tabId)) throw new ExpectedError("tab seçilməyib");
+  // URL-i worker özü oxuyur: silmə ünvanı popup-dan gələn sətirə görə seçilməməlidir
+  let tab = null;
+  try { tab = await chrome.tabs.get(tabId); } catch { throw new ExpectedError("tab tapılmadı (bağlanmış ola bilər)"); }
+
+  const plan = tabCleanupPlan(tab?.url);
+  if (!plan) throw new ExpectedError("bu tabın məlumatı silinə bilməz — yalnız http/https saytları");
+  await wipe(plan, tabId);
+}
+
+// İstifadəçi host icazəsini verəndə çağrılır (background.js → chrome.permissions.onAdded).
+// Gözləyən silmə varsa və icazə MƏHZ onun hostuna aiddirsə silmə tam şəkildə təkrarlanır:
+// beləliklə istifadəçi bir dəfə düyməyə basır, icazəni verir və nəticə tam olur.
+export async function onPermissionsGranted(permissions) {
+  const pending = await readPendingWipe();
+  if (!pending?.domain) return;
+  if (!(permissions?.origins ?? []).includes(originPattern(pending.domain))) return;
+  await clearPendingWipe();
+
+  // Tab hələ yerindədirsə onun öz origin-i ilə, bağlanıbsa yalnız domen üzrə silinir
+  let plan = null;
+  let tabId = null;
+  if (Number.isInteger(pending.tabId)) {
+    try {
+      const tab = await chrome.tabs.get(pending.tabId);
+      plan = tabCleanupPlan(tab?.url);
+      if (plan?.domain === pending.domain) tabId = pending.tabId;
+      else plan = null;
+    } catch { /* tab bağlanıb — aşağıdaki ehtiyat plan işləyir */ }
+  }
+  await wipe(plan ?? tabCleanupPlan(`https://${pending.domain}`), tabId);
+}

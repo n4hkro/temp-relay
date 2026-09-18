@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Temp mail + relay",
+  "version": "1.29.1",
+  "description": "Seçilmiş temp mail saytında yeni ünvan yaradıb clipboard-a kopyalayır; relay tabı bağlananda saytın bütün məlumatını silib tabı yenidən açır.",
+  "icons": { "128": "assets/icon.png" },
+  "action": { "default_popup": "src/popup/popup.html", "default_title": "Temp mail + relay" },
+  "background": { "service_worker": "src/background/background.js", "type": "module" },
+  "permissions": ["activeTab", "tabs", "cookies", "browsingData", "scripting", "storage", "offscreen", "notifications", "clipboardWrite", "declarativeNetRequest", "proxy", "webRequest", "webRequestAuthProvider"],
+  "declarative_net_request": {
+    "rule_resources": [
+      { "id": "provider-origin", "enabled": true, "path": "rules/provider-origin.json" },
+      { "id": "trackers", "enabled": false, "path": "rules/trackers.json" }
+    ]
+  },
+  "host_permissions": [
+    "*://*.temp.tf/*",
+    "*://*.emailnator.com/*",
+    "*://*.api.ipify.org/*"
+  ],
+  "optional_host_permissions": ["*://*/*"]
+}

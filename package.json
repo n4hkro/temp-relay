@@ -1,0 +1,13 @@
+{
+  "name": "temp-relay",
+  "version": "1.29.1",
+  "private": true,
+  "type": "module",
+  "description": "Chrome MV3 extension: temp mail ünvanı yaradır, relay tabı bağlananda saytın məlumatını silib sessiyanı təzələyir.",
+  "scripts": {
+    "check": "node tools/check.mjs",
+    "test": "node --test",
+    "verify": "node tools/check.mjs && node --test",
+    "update:psl": "node tools/update-psl.mjs"
+  }
+}

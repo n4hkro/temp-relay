@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="az" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <title>Temp mail + relay</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <!-- Alət cərgəsi: solda poçt saytı, relay saytı və başlat/dayandır; sağda silmə və tema.
+       Hamısı eyni ölçüdə ikon düymələridir — sayt adları tooltip-də və panellərdə görünür. -->
+  <header>
+    <button id="mail-toggle" class="icon plain" type="button" aria-expanded="false"></button>
+    <button id="relay-toggle" class="icon plain" type="button" aria-expanded="false"></button>
+    <button id="run" class="icon" type="button"></button>
+    <span class="spacer"></span>
+    <button id="shield" class="icon" type="button"></button>
+    <button id="proxy-toggle" class="icon" type="button" aria-expanded="false"></button>
+    <button id="wipe" class="icon danger" type="button"></button>
+    <button id="theme" class="icon" type="button" title="Tema"></button>
+  </header>
+
+  <!-- Poçt saytı və onun parametrləri (provider, dot/plus) — sxemdən qurulur -->
+  <section class="card panel" id="mail-panel" hidden>
+    <label class="picker"><span>Temp mail saytı</span><select id="temp"></select></label>
+    <div id="options"></div>
+  </section>
+
+  <!-- Relay saytı: qeydiyyatdan keçilən sayt -->
+  <section class="card panel" id="relay-panel" hidden>
+    <label class="picker"><span>Relay saytı</span><select id="relay"></select></label>
+    <div class="note" id="relay-url"></div>
+    <!-- Diaqnostika: qeydiyyat səthinin tapılması TƏXMİNDİR. Səhv təxmini kənardan görmək
+         mümkün olmadığı üçün səhifənin təsviri clipboard-a kopyalanır (heç nə dəyişdirilmir). -->
+    <div class="line">
+      <button id="diag" class="mini" type="button">Səhifəni təsvir et</button>
+      <span class="spacer"></span>
+    </div>
+    <div class="note" id="diag-note"></div>
+  </section>
+
+  <!-- Proxy paneli: vəziyyət, TOPLU əlavə (mətn və ya fayl), toplu seçim və siyahı. Siyahı
+       YALNIZ istifadəçinin verdiyi ünvanlardan dolur — açıq mənbələr qəsdən yoxdur.
+       Hərəkət bildirən söz yoxdur: hamısı ikon düyməsidir, rəng vəziyyəti deyir. -->
+  <section class="card panel" id="proxy-panel" hidden>
+    <div class="line">
+      <span class="label" id="proxy-state">Proxy qoşulu deyil</span>
+      <span class="spacer"></span>
+      <button id="proxy-off" class="icon state-on" type="button" title="Ayır" hidden></button>
+    </div>
+    <!-- Çoxsətirli xana: bir proxy də, yüzlərlə də olar. Fayl həm düymə ilə seçilir, həm də
+         bu sahəyə DARTIB atıla bilər (popup faylı özü oxuyur, mətn worker-ə göndərilir). -->
+    <div id="proxy-drop">
+      <textarea id="proxy-input" rows="7" spellcheck="false"
+        placeholder="1.2.3.4:8080&#10;http://user:pass@5.6.7.8:8080&#10;socks5://5.6.7.8:1080&#10;… hər sətirdə bir proxy (faylı buraya da ata bilərsən)"></textarea>
+      <div class="line">
+        <span class="note" id="proxy-hint">Bir və ya yüzlərlə sətir · txt / json / csv</span>
+        <span class="spacer"></span>
+        <button id="proxy-file" class="icon" type="button" title="Fayldan yüklə (txt, json, csv)"></button>
+        <button id="proxy-add" class="icon" type="button" title="Siyahıya əlavə et (Ctrl+Enter)"></button>
+      </div>
+      <input id="proxy-file-input" type="file" accept=".txt,.json,.csv,.list,text/plain,application/json" multiple hidden>
+    </div>
+    <!-- Toplu seçim cərgəsi: hamısını seç → seçilmişləri kopyala / sil -->
+    <div class="line" id="proxy-bulk" hidden>
+      <label class="pick" title="Hamısını seç"><input type="checkbox" id="proxy-all"><span id="proxy-count"></span></label>
+      <span class="spacer"></span>
+      <button id="proxy-copy" class="icon" type="button" title="Seçilmişləri kopyala"></button>
+      <button id="proxy-drop-selected" class="icon danger" type="button" title="Seçilmişləri sil"></button>
+    </div>
+    <div id="proxy-list" class="list"></div>
+    <button id="proxy-more" class="mini" type="button" hidden>Daha çox göstər</button>
+    <!-- Parol tələb edən proxy üçün geniş host icazəsi lazımdır (Chrome-un autentifikasiya
+         pəncərəsini extension özü cavablandırır). İcazə ƏLAVƏ axınında istənilmir: fayl
+         oxunduqdan sonra istifadəçi jesti itir və `permissions.request` batır — ona görə
+         ayrıca düymə var. -->
+    <div class="line" id="proxy-auth" hidden>
+      <span class="note warn" id="proxy-auth-note"></span>
+      <span class="spacer"></span>
+      <button id="proxy-auth-grant" class="mini" type="button">İcazə ver</button>
+    </div>
+    <div class="note" id="proxy-note"></div>
+  </section>
+
+  <!-- Ünvan: yanında ⟳ (yeni ünvan) və ⧉ (kopyala) -->
+  <div class="line" id="mail">
+    <code id="address" class="value muted">ünvan hələ yoxdur</code>
+    <button id="renew" class="icon" type="button" title="Yeni ünvan"></button>
+    <button id="copy-address" class="icon" type="button" title="Ünvanı kopyala"></button>
+  </div>
+
+  <!-- Poçt izləməsinin nəticəsi (shared/inbox.js vəziyyəti) -->
+  <section class="card" id="inbox" hidden>
+    <div class="label" id="inbox-label">Poçt qutusu</div>
+    <div class="line" id="inbox-value" hidden>
+      <code id="inbox-code" class="value"></code>
+      <button id="inbox-copy" class="icon" type="button" title="Kopyala"></button>
+      <a id="inbox-open" class="icon" href="#" target="_blank" rel="noreferrer" title="Aç" hidden></a>
+    </div>
+    <div class="note" id="inbox-note"></div>
+    <div class="note" id="inbox-detail"></div>
+    <button id="inbox-retry" class="mini" type="button">Poçtu yenidən yoxla</button>
+  </section>
+
+  <!-- Qeydiyyat üçün yaradılan hesab: Chrome "Save password"-u rədd etsən buradan götürülür -->
+  <section class="card" id="signup" hidden>
+    <div class="label">Yaradılan hesab</div>
+    <div class="line" id="signup-name-line" hidden>
+      <code id="signup-name" class="value"></code>
+      <button id="signup-name-copy" class="icon" type="button" title="Adı kopyala"></button>
+    </div>
+    <div class="line" id="signup-username-line" hidden>
+      <code id="signup-username" class="value"></code>
+      <button id="signup-username-copy" class="icon" type="button" title="İstifadəçi adını kopyala"></button>
+    </div>
+    <div class="line">
+      <code id="signup-password" class="value"></code>
+      <button id="signup-copy" class="icon" type="button" title="Parolu kopyala"></button>
+    </div>
+    <!-- Formaya yazılan qalan məlumat (telefon, ünvan, doğum tarixi…) — sayt sonra soruşarsa -->
+    <div class="note" id="signup-profile" hidden></div>
+  </section>
+
+  <!-- Status bildiriş kimidir: görünür, sonra öz-özünə yoxa çıxır (format.js → STATUS_TTL_MS) -->
+  <div id="status" hidden></div>
+
+  <footer>
+    <span id="session"></span>
+    <span id="problems" class="note warn" hidden></span>
+  </footer>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
